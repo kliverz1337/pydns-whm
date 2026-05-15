@@ -547,7 +547,7 @@ class DNSScannerTUI(
         self.scan_strategy = "redis"
 
         # Scan preset settings
-        self.scan_preset = "fast"  # "fast", "deep", "full"
+        self.scan_preset = "fast"  # "fast", "deep", "full", "whm"
         self.preset_max_ips = 0  # 0 = unlimited
         self.preset_shuffle_threshold = 0  # Auto-shuffle after N IPs with no find
         self.preset_auto_shuffle = False
@@ -562,6 +562,7 @@ class DNSScannerTUI(
         self.resolve_results: dict[str, str] = {}  # IP -> resolved IP address string
         self.edns0_test_enabled = True  # EDNS0 support test
         self.isp_info_enabled = True  # AS/ISP information lookup
+        self.whm_test_enabled = True  # WHM (Web Host Manager) detection
 
         # Advanced test results storage
         self.security_results: dict[str, dict] = {}  # IP -> {dnssec, hijacked, open, filtered}
@@ -569,6 +570,7 @@ class DNSScannerTUI(
         self.isp_results: dict[str, dict] = {}  # IP -> {asn, org, country}
         self.tcp_udp_results: dict[str, str] = {}  # IP -> "TCP/UDP", "TCP only", "UDP only"
         self.dns_types_results: dict[str, dict] = {}  # IP -> {A: bool, TXT: bool, ...}
+        self.whm_results: dict[str, dict] = {}  # IP -> {whm: bool, hostname: str}
         self.extra_test_tasks: set = set()  # Track running extra test tasks
         self.extra_test_semaphore: asyncio.Semaphore | None = None  # Limits concurrent extra tests
 
@@ -658,7 +660,12 @@ class DNSScannerTUI(
                     with Vertical(classes="form-field"):
                         yield Label("CIDR File:", classes="field-label")
                         yield Select(
-                            [("Iran IPs (~10M IPs)", "iran"), ("Custom File...", "custom")],
+                            [
+                                ("Iran IPs (~10M IPs)", "iran"),
+                                ("Indonesia Full (~19M IPs)", "indonesia"),
+                                ("Indonesia Datacenter (WHM targeted)", "indonesia_dc"),
+                                ("Custom File...", "custom"),
+                            ],
                             value="iran",
                             allow_blank=False,
                             id="input-cidr-select",
@@ -670,6 +677,7 @@ class DNSScannerTUI(
                                 ("Fast Scan (25K, shuffle/500)", "fast"),
                                 ("Deep Scan (50k, shuffle/1K)", "deep"),
                                 ("Full Scan (shuffle/3K)", "full"),
+                                ("WHM Scan (Full, WHM optimized)", "whm"),
                             ],
                             value="fast",
                             allow_blank=False,
@@ -765,6 +773,7 @@ class DNSScannerTUI(
 
                 with Horizontal(classes="form-row checkbox-row"):
                     yield Checkbox("Proxy Test", id="input-slipstream")
+                    yield Checkbox("WHM Detect", value=self.whm_test_enabled, id="input-whm")
                     yield Checkbox("Bell on Pass", id="input-bell")
                     yield Checkbox("Advanced", id="input-show-advanced")
 
@@ -889,6 +898,22 @@ class DNSScannerTUI(
         # Load configuration and populate form
         config = self._load_config()
         try:
+            # CIDR selection
+            if config.get("cidr_selection"):
+                cidr_select = self.query_one("#input-cidr-select", Select)
+                cidr_val = config["cidr_selection"]
+                if cidr_val == "selected_file" and config.get("selected_cidr_file"):
+                    self.selected_cidr_file = config["selected_cidr_file"]
+                    file_name = Path(self.selected_cidr_file).name
+                    cidr_select.set_options([
+                        ("Iran IPs (~10M IPs)", "iran"),
+                        ("Indonesia Full (~19M IPs)", "indonesia"),
+                        ("Indonesia Datacenter (WHM targeted)", "indonesia_dc"),
+                        ("Custom File...", "custom"),
+                        (file_name, "selected_file"),
+                    ])
+                cidr_select.value = cidr_val
+
             # Domain
             if config.get("domain"):
                 domain_input = self.query_one("#input-domain", Input)
@@ -903,6 +928,15 @@ class DNSScannerTUI(
             if config.get("scan_preset"):
                 preset_select = self.query_one("#input-preset", Select)
                 preset_select.value = config["scan_preset"]
+                # Auto-configure WHM preset settings on load
+                if config["scan_preset"] == "whm":
+                    self.whm_test_enabled = True
+                    self.scan_strategy = "redis"
+                    try:
+                        whm_cb = self.query_one("#input-whm", Checkbox)
+                        whm_cb.value = True
+                    except Exception:
+                        pass
 
             # Protocol selector
             if config.get("active_protocol") == "slipnet":
@@ -997,6 +1031,10 @@ class DNSScannerTUI(
             if config.get("slipstream_enabled") is not None:
                 slip_checkbox = self.query_one("#input-slipstream", Checkbox)
                 slip_checkbox.value = config.get("slipstream_enabled")
+            # WHM detection setting
+            if config.get("whm_test_enabled") is not None:
+                whm_checkbox = self.query_one("#input-whm", Checkbox)
+                whm_checkbox.value = config.get("whm_test_enabled")
 
             # Advanced settings
             if config.get("dns_timeout"):
@@ -1049,6 +1087,8 @@ class DNSScannerTUI(
             cols.append(("Proxy", "proxy", 12))
         cols.append(("IP Address", "ip", None))
         cols.append(("Ping", "time", None))
+        if self.whm_test_enabled:
+            cols.append(("WHM", "whm", None))
         cols.append(("IPv4/IPv6", "ipver", None))
         cols.append(("Security", "security", None))
         cols.append(("TCP/UDP", "tcpudp", None))
@@ -1297,7 +1337,7 @@ class DNSScannerTUI(
                 self._processing_button = False
 
     def on_select_changed(self, event: Select.Changed) -> None:
-        """Handle CIDR dropdown selection changes."""
+        """Handle dropdown selection changes."""
         if event.select.id == "input-cidr-select":
             browser = self.query_one("#file-browser-container")
             if event.value == "custom":
@@ -1306,6 +1346,61 @@ class DNSScannerTUI(
             else:
                 # Hide browser for other selections
                 browser.display = False
+
+        elif event.select.id == "input-preset":
+            # Auto-configure settings when WHM Scan preset is selected
+            if event.value == "whm":
+                try:
+                    # Enable WHM detection
+                    whm_cb = self.query_one("#input-whm", Checkbox)
+                    whm_cb.value = True
+                    self.whm_test_enabled = True
+
+                    # Set protocol to DNS Scan (no proxy needed for WHM detection)
+                    dns_scan_cb = self.query_one("#proto-dns-scan", Checkbox)
+                    dns_scan_cb.value = True
+                    # Trigger protocol change logic
+                    self._proto_lock = False
+                    for other_id in ("proto-slipstream", "proto-slipnet"):
+                        self.query_one(f"#{other_id}", Checkbox).value = False
+                    # Hide domain row for DNS Scan, show auth section hidden
+                    try:
+                        self.query_one("#slipstream-auth-sub").display = False
+                        self.query_one("#domain-options").display = False
+                    except Exception:
+                        pass
+
+                    # Disable Proxy Test (not needed for WHM detection)
+                    proxy_cb = self.query_one("#input-slipstream", Checkbox)
+                    proxy_cb.value = False
+                    self.test_slipstream = False
+
+                    # Set domain to google.com
+                    domain_input = self.query_one("#input-domain", Input)
+                    if not domain_input.value.strip():
+                        domain_input.value = "google.com"
+
+                    self.scan_strategy = "redis"
+                except Exception as e:
+                    logger.debug(f"Could not auto-configure WHM preset: {e}")
+            else:
+                # Restore normal UI when switching away from WHM preset
+                try:
+                    # Restore protocol to Slipstream
+                    self._proto_lock = False
+                    self.query_one("#proto-slipstream", Checkbox).value = True
+                    for other_id in ("proto-slipnet", "proto-dns-scan"):
+                        self.query_one(f"#{other_id}", Checkbox).value = False
+                    # Show auth section and domain options again
+                    self.query_one("#slipstream-auth-sub").display = True
+                    self.query_one("#domain-options").display = True
+                    # Show proxy test checkbox again
+                    self.query_one("#input-slipstream", Checkbox).display = True
+                    self.query_one("#input-show-advanced", Checkbox).display = True
+                    # Restore scan strategy to default
+                    self.scan_strategy = "redis"
+                except Exception as e:
+                    logger.debug(f"Could not restore UI from WHM preset: {e}")
 
     def on_checkbox_changed(self, event: Checkbox.Changed) -> None:
         """Handle checkbox state changes."""
@@ -1317,6 +1412,9 @@ class DNSScannerTUI(
                 container.display = event.value
             except Exception as e:
                 logger.debug(f"Could not toggle advanced settings container: {e}")
+
+        elif cb_id == "input-whm":
+            self.whm_test_enabled = event.value
 
         elif cb_id in ("proto-slipstream", "proto-slipnet", "proto-dns-scan"):
             if self._proto_lock:
@@ -1404,6 +1502,8 @@ class DNSScannerTUI(
         file_name = Path(selected_file).name
         cidr_select.set_options([
             ("Iran IPs (~10M IPs)", "iran"),
+            ("Indonesia Full (~19M IPs)", "indonesia"),
+            ("Indonesia Datacenter (WHM targeted)", "indonesia_dc"),
             ("Custom File...", "custom"),
             (file_name, "selected_file"),
         ])
@@ -1569,6 +1669,11 @@ class DNSScannerTUI(
         except Exception:
             return 200
 
+    def _preset_display_name(self) -> str:
+        """Return human-readable preset name for log messages."""
+        names = {"fast": "Fast", "deep": "Deep", "full": "Full", "whm": "WHM"}
+        return names.get(self.scan_preset, self.scan_preset.title())
+
     def _apply_scan_preset(self) -> None:
         """Apply scan preset settings."""
         if self.scan_preset == "fast":
@@ -1583,6 +1688,13 @@ class DNSScannerTUI(
             self.preset_max_ips = 0  # Unlimited
             self.preset_shuffle_threshold = 3000
             self.preset_auto_shuffle = True
+        elif self.scan_preset == "whm":
+            # WHM-optimized: full coverage, auto-shuffle, WHM detection enabled
+            self.preset_max_ips = 0  # Unlimited — WHM servers are rare
+            self.preset_shuffle_threshold = 2000  # Auto-shuffle after 2K dead IPs
+            self.preset_auto_shuffle = True
+            self.whm_test_enabled = True
+            self.scan_strategy = "redis"  # Pincer coverage pattern
         else:  # Default to fast
             self.preset_max_ips = 25000
             self.preset_shuffle_threshold = 500
@@ -1596,6 +1708,7 @@ class DNSScannerTUI(
         concurrency_input = self.query_one("#input-concurrency", Input)
         random_checkbox = self.query_one("#input-random", Checkbox)
         slipstream_checkbox = self.query_one("#input-slipstream", Checkbox)
+        whm_checkbox = self.query_one("#input-whm", Checkbox)
         bell_checkbox = self.query_one("#input-bell", Checkbox)
 
         # Determine CIDR file based on dropdown selection
@@ -1611,6 +1724,26 @@ class DNSScannerTUI(
                 )
                 return
             self.subnet_file = str(iran_cidr_path)
+        elif cidr_value == "indonesia":
+            # Use bundled full Indonesia CIDR file
+            indo_cidr_path = _resource_path("indonesia-ipv4.cidrs")
+            if not indo_cidr_path.exists():
+                self.notify(
+                    "Indonesia CIDR file not found! Please reinstall or select a custom file.",
+                    severity="error",
+                )
+                return
+            self.subnet_file = str(indo_cidr_path)
+        elif cidr_value == "indonesia_dc":
+            # Use bundled targeted Indonesia datacenter/hosting CIDR file for WHM scans
+            indo_dc_cidr_path = _resource_path("indonesia-dc-ipv4.cidrs")
+            if not indo_dc_cidr_path.exists():
+                self.notify(
+                    "Indonesia Datacenter CIDR file not found! Please reinstall or select a custom file.",
+                    severity="error",
+                )
+                return
+            self.subnet_file = str(indo_dc_cidr_path)
         elif cidr_value == "custom":
             # User selected "Custom File..." but hasn't picked a file yet
             self.notify(
@@ -1646,6 +1779,7 @@ class DNSScannerTUI(
         self.dns_type = "A"
         self.random_subdomain = random_checkbox.value
         self.test_slipstream = slipstream_checkbox.value
+        self.whm_test_enabled = whm_checkbox.value
         self.bell_sound_enabled = bell_checkbox.value
         try:
             self.debug_mode = self.query_one("#input-debug", Checkbox).value
@@ -1846,6 +1980,8 @@ class DNSScannerTUI(
         import base64
         config = {
             "domain": self.domain,
+            "cidr_selection": cidr_value,
+            "selected_cidr_file": self.selected_cidr_file,
             "scan_preset": self.scan_preset,
             "concurrency": self.concurrency,
             "proxy_auth_enabled": self.proxy_auth_enabled,
@@ -1853,6 +1989,7 @@ class DNSScannerTUI(
             "proxy_password": base64.b64encode(self.proxy_password.encode("utf-8")).decode("utf-8") if self.proxy_auth_enabled and self.proxy_password else "",
             # slipstream-related flags
             "slipstream_enabled": self.test_slipstream,
+            "whm_test_enabled": self.whm_test_enabled,
             # Protocol & SlipNet
             "active_protocol": self.active_protocol,
             "slipnet_url": self.slipnet_url,
@@ -1903,7 +2040,7 @@ class DNSScannerTUI(
         log_widget.write(f"[yellow]Domain:[/yellow] {self.domain}")
         log_widget.write("[yellow]DNS Types:[/yellow] NS, TXT, RND, DPI, EDNS0, NXD")
         log_widget.write(f"[yellow]Concurrency:[/yellow] {self.concurrency}")
-        log_widget.write(f"[yellow]Scan Preset:[/yellow] {self.scan_preset}")
+        log_widget.write(f"[yellow]Scan Preset:[/yellow] {self._preset_display_name()}")
         log_widget.write(
             f"[yellow]Proxy Test:[/yellow] {'Enabled' if self.test_slipstream else 'Disabled'}"
         )
@@ -2001,7 +2138,7 @@ class DNSScannerTUI(
             log_widget.write(f"[yellow]Domain:[/yellow] {self.domain}")
         log_widget.write("[yellow]DNS Types:[/yellow] NS, TXT, RND, DPI, EDNS0, NXD")
         log_widget.write(f"[yellow]Concurrency:[/yellow] {self.concurrency}")
-        log_widget.write(f"[yellow]Scan Preset:[/yellow] {self.scan_preset}")
+        log_widget.write(f"[yellow]Scan Preset:[/yellow] {self._preset_display_name()}")
         log_widget.write(f"[yellow]Proxy Test:[/yellow] Enabled ({protocol_name})")
         if self.active_protocol == "slipstream":
             log_widget.write(f"[yellow]Auth Mode:[/yellow] {self.auth_mode}")
@@ -2337,6 +2474,7 @@ class DNSScannerTUI(
         self.resolve_results.clear()
         self.tcp_udp_results.clear()
         self.dns_types_results.clear()
+        self.whm_results.clear()
         self.extra_test_tasks.clear()
         self.extra_test_semaphore = asyncio.Semaphore(5)  # Max 5 concurrent extra tests
         self._isp_rate_lock = asyncio.Lock()  # Serialize ip-api.com requests
@@ -2418,7 +2556,7 @@ class DNSScannerTUI(
         effective_total = total_ips
         if self.preset_max_ips > 0:
             effective_total = min(total_ips, self.preset_max_ips)
-            self._log(f"[cyan]Found {total_ips:,} IPs in file. {self.scan_preset.title()} scan limited to {effective_total:,} IPs.[/cyan]")
+            self._log(f"[cyan]Found {total_ips:,} IPs in file. {self._preset_display_name()} scan limited to {effective_total:,} IPs.[/cyan]")
         else:
             self._log(f"[cyan]Found {total_ips:,} total IPs to scan. Starting...[/cyan]")
         await asyncio.sleep(0)
@@ -2672,6 +2810,7 @@ class DNSScannerTUI(
                     found=len(self.found_servers),
                     passed=self._passed_count,
                     failed=self._failed_count,
+                    whm=self._get_whm_count(),
                     elapsed=elapsed,
                     speed=self.current_scanned / elapsed if elapsed > 0 else 0,
                     total=self.current_scanned,  # Set total to actual scanned count
@@ -2832,7 +2971,7 @@ class DNSScannerTUI(
                         self.auto_shuffle_count += 1
                         self.ips_since_last_found = 0
                         self._log(
-                            f"[yellow]Auto-shuffle ({self.scan_preset}): "
+                            f"[yellow]Auto-shuffle ({self._preset_display_name()}): "
                             f"No DNS in {self.preset_shuffle_threshold} IPs[/yellow]"
                         )
                         # Signal instant reshuffle - no pause needed
@@ -2845,7 +2984,7 @@ class DNSScannerTUI(
                 and self.current_scanned >= self.preset_max_ips
             ):
                 self._log(
-                    f"[yellow]{self.scan_preset.title()} scan limit reached ({self.preset_max_ips} IPs). Stopping.[/yellow]"
+                    f"[yellow]{self._preset_display_name()} scan limit reached ({self.preset_max_ips} IPs). Stopping.[/yellow]"
                 )
                 if self._shutdown_event:
                     self._shutdown_event.set()
@@ -2875,6 +3014,7 @@ class DNSScannerTUI(
                             secure=secure_cnt,
                             normal=normal_cnt,
                             filtered=filtered_cnt,
+                            whm=self._get_whm_count(),
                             current_ip=self._current_scanning_ip,
                             current_range=self._current_scanning_range,
                             bar_progress=float(self.current_scanned),
@@ -2952,6 +3092,13 @@ class DNSScannerTUI(
 
         return secure, normal, filtered
 
+    def _get_whm_count(self) -> int:
+        """Return count of WHM-positive servers from whm_results."""
+        try:
+            return sum(1 for w in self.whm_results.values() if isinstance(w, dict) and w.get("whm"))
+        except Exception:
+            return 0
+
     def _tick_stats(self) -> None:
         """Periodic stats refresh for smooth speed/scanned display."""
         if not hasattr(self, "start_time") or self.start_time <= 0:
@@ -2976,6 +3123,7 @@ class DNSScannerTUI(
                     secure=secure_cnt,
                     normal=normal_cnt,
                     filtered=filtered_cnt,
+                    whm=self._get_whm_count(),
                     current_ip=getattr(self, "_current_scanning_ip", ""),
                     current_range=getattr(self, "_current_scanning_range", ""),
                     bar_progress=float(self.current_scanned),
@@ -3076,6 +3224,14 @@ class DNSScannerTUI(
                         details.append(
                             f"  ISP: {isp.get('org', '')} | AS: {isp.get('asn', '')} | "
                             f"Country: {isp.get('country', '')}"
+                        )
+                    whm = self.whm_results.get(ip)
+                    if whm:
+                        whm_status = "Yes" if whm.get("whm") else "No"
+                        whm_host = whm.get("hostname", "")
+                        details.append(
+                            f"  WHM: {whm_status}"
+                            f"{f' ({whm_host})' if whm_host else ''}"
                         )
                     if details:
                         self._log(f"[cyan]── Details for {ip} ──[/cyan]")

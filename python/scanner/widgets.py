@@ -82,6 +82,7 @@ class StatsWidget(Widget):
         self.secure: int = 0
         self.normal: int = 0
         self.filtered: int = 0
+        self.whm: int = 0
         self.scanned: int = 0
         self.total: int = 0
         self.speed: float = 0.0
@@ -99,6 +100,8 @@ class StatsWidget(Widget):
         self._w_now = Static("")
         self._w_dns = Static("")
         self._w_dns.tooltip = "F=Found   P=Pass   X=Fail"
+        self._w_whm = Static("")
+        self._w_whm.tooltip = "WHM servers detected (cPanel Web Host Manager)"
         self._w_sec = Static("")
         self._w_sec.tooltip = "S=Secure   N=Normal   F=Filtered"
         self._w_speed = Static("")
@@ -112,6 +115,7 @@ class StatsWidget(Widget):
         yield self._w_scan
         yield self._w_now
         yield self._w_dns
+        yield self._w_whm
         yield self._w_sec
         yield self._w_speed
         yield self._w_time
@@ -128,6 +132,7 @@ class StatsWidget(Widget):
         secure: int | None = None,
         normal: int | None = None,
         filtered: int | None = None,
+        whm: int | None = None,
         total: int | None = None,
         speed: float | None = None,
         elapsed: float | None = None,
@@ -151,6 +156,8 @@ class StatsWidget(Widget):
             self.normal = normal
         if filtered is not None:
             self.filtered = filtered
+        if whm is not None:
+            self.whm = whm
         if total is not None:
             self.total = total
         if speed is not None:
@@ -203,6 +210,11 @@ class StatsWidget(Widget):
             f"[#22c55e]{self.passed}[/#22c55e]"
             f"[dim] / [/dim]"
             f"[#ef4444]{self.failed}[/#ef4444]"
+        )
+        self._w_whm.update(
+            f"[yellow]WHM:[/yellow]   "
+            f"[#22c55e]{self.whm}[/#22c55e]"
+            f"[dim] servers detected[/dim]"
         )
         self._w_sec.update(
             f"[yellow]SEC:[/yellow]   "

@@ -31,6 +31,8 @@ class ResultsMixin:
             if self.test_slipstream:
                 row.append(self._get_proxy_str(ip))
             row.extend([ip, time_str])
+            if self.whm_test_enabled:
+                row.append(self._get_whm_column(ip))
             row.extend([
                 self._get_ipver_column(ip),
                 self._get_security_column(ip),
@@ -103,6 +105,17 @@ class ResultsMixin:
             return "[green]\u2713[/green]"
         return "[red]\u2717[/red]"
 
+    def _get_whm_column(self, ip: str) -> str:
+        whm = self.whm_results.get(ip)
+        if whm is None:
+            return "[dim]\u2026[/dim]"
+        if whm.get("whm"):
+            hostname = whm.get("hostname", "")
+            if hostname:
+                return f"[green]\u2713 {hostname}[/green]"
+            return "[green]\u2713[/green]"
+        return "[red]\u2717[/red]"
+
     def _get_dns_types_column(self, ip: str) -> str:
         types = self.dns_types_results.get(ip)
         if types is None:
@@ -157,6 +170,8 @@ class ResultsMixin:
                 table.update_cell(ip, "resolved", self._get_resolve_column(ip))
                 table.update_cell(ip, "dns_types", self._get_dns_types_column(ip))
                 table.update_cell(ip, "edns0", self._get_edns0_column(ip))
+                if self.whm_test_enabled:
+                    table.update_cell(ip, "whm", self._get_whm_column(ip))
         except Exception as e:
             logger.debug(f"Could not update table row for {ip}: {e}")
 
@@ -181,13 +196,14 @@ class ResultsMixin:
                         proxy_rank = 3
                 else:
                     proxy_rank = 0
+                whm_rank = 0 if self.whm_results.get(ip, {}).get("whm") else 1
                 dns_score_rank = 6 - sum(
                     1 for v in self.dns_types_results.get(ip, {}).values() if v
                 )
                 dnssec_rank = (
                     0 if self.security_results.get(ip, {}).get("dnssec") else 1
                 )
-                return (proxy_rank, dns_score_rank, dnssec_rank, self.server_times.get(ip, 9999.0))
+                return (proxy_rank, whm_rank, dns_score_rank, dnssec_rank, self.server_times.get(ip, 9999.0))
 
             sorted_final = sorted(finalized, key=_sort_key)
             sorted_testing = sorted(testing, key=_sort_key)
@@ -207,6 +223,8 @@ class ResultsMixin:
                 if self.test_slipstream:
                     row.append(self._get_proxy_str(ip))
                 row.extend([ip, _format_time(self.server_times[ip])])
+                if self.whm_test_enabled:
+                    row.append(self._get_whm_column(ip))
                 row.extend([
                     self._get_ipver_column(ip),
                     self._get_security_column(ip),
@@ -233,6 +251,8 @@ class ResultsMixin:
         if self.security_test_enabled and ip not in self.security_results:
             return False
         if self.isp_info_enabled and ip not in self.isp_results:
+            return False
+        if self.whm_test_enabled and ip not in self.whm_results:
             return False
         proto = self.protocol_results.get(ip, {})
         if self.ipv6_test_enabled and "ipv6" not in proto:
@@ -261,6 +281,8 @@ class ResultsMixin:
         if self.test_slipstream:
             headers.append("Proxy")
         headers.extend(["DNS", "Ping (ms)"])
+        if self.whm_test_enabled:
+            headers.append("WHM")
         headers.append("IPv4/IPv6")
         headers.append("TCP/UDP")
         if self.security_test_enabled:
@@ -310,6 +332,16 @@ class ResultsMixin:
                 else:
                     row.append("[\u25cf]")
             row.extend([ip, f"{resp_time * 1000:.0f}"])
+            # WHM
+            if self.whm_test_enabled:
+                whm = self.whm_results.get(ip)
+                if whm and whm.get("whm"):
+                    hostname = whm.get("hostname", "")
+                    row.append(f"Yes ({hostname})" if hostname else "Yes")
+                elif whm is not None:
+                    row.append("No")
+                else:
+                    row.append("")
             # IPv4/IPv6
             proto = self.protocol_results.get(ip, {})
             if proto.get("ipv6"):
@@ -360,6 +392,57 @@ class ResultsMixin:
             row.append(org if org != "-" else "")
             rows.append(row)
         return headers, rows
+
+    # ── WHM TXT export ──────────────────────────────────────────────────
+
+    def _save_whm_results_txt(self, output_dir: Path, timestamp: str) -> None:
+        """Save WHM-positive servers to a plain-text file.
+
+        Only servers where ``whm_results[ip]["whm"]`` is True are included.
+        The file is written to ``results/whm_<timestamp>.txt``.
+        """
+        if not self.whm_test_enabled:
+            return
+
+        whm_servers = {
+            ip: info
+            for ip, info in self.whm_results.items()
+            if info.get("whm")
+        }
+        if not whm_servers:
+            self._log("[yellow]No WHM servers found — skipping TXT export.[/yellow]")
+            return
+
+        txt_file = output_dir / f"whm_{timestamp}.txt"
+
+        try:
+            with open(txt_file, "w", encoding="utf-8") as f:
+                f.write(f"WHM Detection Results\n")
+                f.write(f"{'=' * 40}\n")
+                f.write(f"Scan: {timestamp.replace('_', ' ')}\n")
+                f.write(f"WHM Servers Found: {len(whm_servers)}\n\n")
+
+                for ip, info in whm_servers.items():
+                    hostname = info.get("hostname", "")
+                    resolved = self.resolve_results.get(ip, "")
+                    isp = self.isp_results.get(ip, {})
+                    org = isp.get("org", "") or ""
+                    if org == "-":
+                        org = ""
+                    f.write(f"DNS IP   : {ip}\n")
+                    if resolved:
+                        f.write(f"Resolved : {resolved}\n")
+                    if hostname:
+                        f.write(f"Hostname : {hostname}\n")
+                    if org:
+                        f.write(f"ISP      : {org}\n")
+                    f.write(f"{'-' * 40}\n\n")
+
+            self._log(f"[green]✓ WHM results saved to: {txt_file}[/green]")
+            logger.info(f"WHM results saved to {txt_file}")
+        except (OSError, IOError, PermissionError) as e:
+            self._log(f"[red]Failed to save WHM results: {e}[/red]")
+            logger.error(f"Failed to save WHM results to {txt_file}: {e}")
 
     def _auto_save_results(self) -> None:
         if self.test_slipstream:
@@ -415,6 +498,9 @@ class ResultsMixin:
             self._log(f"[red]Failed to save results: {e}[/red]")
             logger.error(f"Failed to auto-save results to {csv_file}: {e}")
 
+        # ── Save WHM results as TXT ──
+        self._save_whm_results_txt(output_dir, timestamp)
+
     def action_save_results(self) -> None:
         if self.test_slipstream:
             passed_servers = {
@@ -458,3 +544,6 @@ class ResultsMixin:
         except (OSError, IOError, PermissionError) as e:
             self.notify(f"Failed to save results: {e}", severity="error")
             logger.error(f"Failed to save results to {csv_file}: {e}")
+
+        # ── Save WHM results as TXT ──
+        self._save_whm_results_txt(output_dir, timestamp)

@@ -14,6 +14,7 @@ import dns.exception
 import dns.message
 import dns.rdatatype
 import dns.resolver
+import httpx
 
 from .constants import logger
 
@@ -40,9 +41,10 @@ class ExtraTestsMixin:
 
     Expected attributes on *self*:
         extra_test_semaphore, security_test_enabled, ipv6_test_enabled,
-        edns0_test_enabled, isp_info_enabled, security_results,
-        protocol_results, isp_results, resolve_results, tcp_udp_results,
-        extra_test_tasks, domain, dns_type, _isp_cache_path
+        edns0_test_enabled, isp_info_enabled, whm_test_enabled,
+        security_results, protocol_results, isp_results, resolve_results,
+        tcp_udp_results, whm_results, extra_test_tasks, domain, dns_type,
+        _isp_cache_path
     """
 
     @staticmethod
@@ -83,6 +85,8 @@ class ExtraTestsMixin:
                     tasks.append(asyncio.create_task(self._test_edns0(dns_ip)))
                 if self.isp_info_enabled:
                     tasks.append(asyncio.create_task(self._test_isp_info(dns_ip)))
+                if self.whm_test_enabled:
+                    tasks.append(asyncio.create_task(self._test_whm(dns_ip)))
                 if tasks:
                     await asyncio.gather(*tasks, return_exceptions=True)
 
@@ -507,3 +511,78 @@ class ExtraTestsMixin:
 
         self.tcp_udp_results[ip] = result
         logger.debug(f"{ip}: Protocol support = {result}")
+
+    # ── WHM (Web Host Manager) detection ────────────────────────────────
+
+    async def _test_whm(self, ip: str) -> None:
+        """Check whether the resolved IP hosts a WHM (cPanel Web Host Manager) panel.
+
+        WHM panels are typically served on port 2086 (HTTP) or 2087 (HTTPS)
+        and their login page contains distinctive markers like the title
+        ``WHM`` or the cPanel branding in the HTML response.
+
+        The test resolves the DNS server's IP through itself first, then
+        attempts an HTTPS GET to ``https://<resolved_ip>:2087/`` looking for
+        WHM-specific content. Falls back to HTTP on port 2086 if HTTPS fails.
+        """
+        result: dict = {"whm": False, "hostname": ""}
+        try:
+            # Use the resolved IP (from _test_resolve) as the target host
+            resolved = self.resolve_results.get(ip, "")
+            if not resolved or resolved == "-":
+                # No resolved IP available — skip WHM test
+                self.whm_results[ip] = result
+                return
+
+            target_ip = resolved.split(",")[0].strip()
+
+            # Try HTTPS first (port 2087 — WHM secure)
+            whm_found = False
+            hostname = ""
+            for port, use_https in [(2087, True), (2086, False)]:
+                try:
+                    scheme = "https" if use_https else "http"
+                    url = f"{scheme}://{target_ip}:{port}/"
+                    async with httpx.AsyncClient(
+                        verify=False,  # WHM often uses self-signed certs
+                        timeout=httpx.Timeout(5.0, connect=3.0),
+                        follow_redirects=True,
+                        limits=httpx.Limits(max_connections=2),
+                    ) as client:
+                        resp = await client.get(url)
+                        body = resp.text[:4096]  # Only inspect first 4KB
+
+                        # WHM login page indicators:
+                        # - Title contains "WHM" or "Web Host Manager"
+                        # - cPanel/WHM branding in meta or body
+                        # - Known WHM login form patterns
+                        if any(marker in body for marker in (
+                            "WHM", "Web Host Manager", "cPanel",
+                            "whm-login", "cpsrvd",
+                        )):
+                            whm_found = True
+                            # Try to extract hostname from title or meta
+                            import re as _re
+                            title_match = _re.search(
+                                r"<title>(.*?)</title>", body, _re.IGNORECASE
+                            )
+                            if title_match:
+                                hostname = title_match.group(1).strip()
+                            break
+                except (httpx.TimeoutException, httpx.ConnectError,
+                        httpx.HTTPStatusError, Exception):
+                    continue
+
+            result = {"whm": whm_found, "hostname": hostname}
+            if whm_found:
+                self._log(
+                    f"[green]✓ {ip}: WHM detected on {target_ip}"
+                    f"{f' — {hostname}' if hostname else ''}[/green]"
+                )
+            else:
+                self._log(f"[dim]{ip}: No WHM on {target_ip}[/dim]")
+
+        except Exception as e:
+            logger.debug(f"WHM test error for {ip}: {e}")
+
+        self.whm_results[ip] = result
