@@ -279,7 +279,8 @@ pip install -r requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple
 
 #### Step 3: Run the Application
 ```bash
-python -m python
+python3 --version   # must be Python 3.11+
+python3 -m python
 ```
 
 ---
@@ -311,7 +312,10 @@ cd pydns-whm
 
 #### 3. Create and activate a Python virtual environment
 
+PYDNS Scanner requires Python 3.11 or newer. On some VPS images, the `python` command still points to Python 2.7, so always use `python3` or install `python3.11`.
+
 ```bash
+python3 --version   # must be Python 3.11+
 python3 -m venv .venv
 source .venv/bin/activate
 ```
@@ -332,8 +336,10 @@ tmux new -s pydns
 #### 6. Run PYDNS Scanner inside tmux
 
 ```bash
-python -m python
+python3 -m python
 ```
+
+If your VPS shows Python 2.7 when running `python`, do not use `python -m python`. Use `python3 -m python` instead.
 
 #### 7. Detach from tmux without stopping the scan
 
@@ -385,7 +391,7 @@ pydns-scanner
 
 **From source:**
 ```bash
-python -m python
+python3 -m python
 ```
 
 This will launch the interactive TUI where you can configure:
