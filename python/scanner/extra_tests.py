@@ -92,6 +92,7 @@ class ExtraTestsMixin:
 
                 # WHM test MUST run after resolve completes (depends on resolve_results)
                 if self.whm_test_enabled:
+                    self._log(f"[dim]🔍 WHM check: {dns_ip}...[/dim]")
                     await self._test_whm(dns_ip)
 
                 # Post-check: if the resolved IP is a bogon/private address
