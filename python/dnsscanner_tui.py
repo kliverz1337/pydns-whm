@@ -938,11 +938,14 @@ class DNSScannerTUI(
                     except Exception:
                         pass
 
-            # Protocol selector
+            # Protocol selector — set target FIRST to avoid blink loop:
+            # unchecking the old protocol triggers on_checkbox_changed which
+            # re-checks it if no other protocol is selected.  By setting the
+            # target True first we guarantee the guard sees another selection.
             if config.get("active_protocol") == "slipnet":
                 try:
-                    self.query_one("#proto-slipstream", Checkbox).value = False
                     self.query_one("#proto-slipnet", Checkbox).value = True
+                    self.query_one("#proto-slipstream", Checkbox).value = False
                     self.query_one("#slipnet-fields-container").display = True
                     self.query_one("#slipnet-query-size-container").display = True
                     for row in self.query(".domain-row"):
@@ -951,8 +954,8 @@ class DNSScannerTUI(
                     pass
             elif config.get("active_protocol") == "dns_scan":
                 try:
-                    self.query_one("#proto-slipstream", Checkbox).value = False
                     self.query_one("#proto-dns-scan", Checkbox).value = True
+                    self.query_one("#proto-slipstream", Checkbox).value = False
                     self.query_one("#slipstream-auth-sub").display = False
                     self.query_one("#slipnet-fields-container").display = False
                     self.query_one("#slipnet-query-size-container").display = False
