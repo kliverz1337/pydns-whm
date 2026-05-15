@@ -2838,6 +2838,12 @@ class DNSScannerTUI(
                 self._log("[yellow]Timeout waiting for extra tests[/yellow]")
             self.table_needs_rebuild = True
             self._rebuild_table()
+            try:
+                stats = self._stats_widget
+                if stats is not None:
+                    stats.update_stats(whm=self._get_whm_count())
+            except Exception:
+                pass
 
         # Wait for all pending proxy tests to complete
         if self.test_slipstream and self.slipstream_tasks:

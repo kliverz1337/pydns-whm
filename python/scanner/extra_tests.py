@@ -596,3 +596,19 @@ class ExtraTestsMixin:
             logger.debug(f"WHM test error for {ip}: {e}")
 
         self.whm_results[ip] = result
+
+        # Refresh the WHM statistic immediately. Extra tests run after the main
+        # DNS counter reaches 100%, so relying only on the periodic scan tick can
+        # leave the sidebar showing the old value even though the table/logs were
+        # already updated.
+        try:
+            stats = getattr(self, "_stats_widget", None)
+            if stats is not None:
+                whm_count = sum(
+                    1
+                    for whm in self.whm_results.values()
+                    if isinstance(whm, dict) and whm.get("whm")
+                )
+                stats.update_stats(whm=whm_count)
+        except Exception:
+            pass
