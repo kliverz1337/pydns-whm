@@ -284,6 +284,96 @@ python -m python
 
 ---
 
+### 🖥️ Run on a VPS with tmux
+
+For long scans on a VPS, use `tmux` so the scanner keeps running even if your SSH connection disconnects.
+This is recommended because PYDNS Scanner is an interactive TUI application.
+
+#### 1. Install system packages
+
+**Ubuntu / Debian:**
+```bash
+sudo apt update
+sudo apt install -y git python3 python3-venv python3-pip tmux
+```
+
+**CentOS / AlmaLinux / Rocky Linux:**
+```bash
+sudo dnf install -y git python3 python3-pip tmux
+```
+
+#### 2. Clone the repository
+
+```bash
+git clone https://github.com/kliverz1337/pydns-whm.git
+cd pydns-whm
+```
+
+#### 3. Create and activate a Python virtual environment
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+```
+
+#### 4. Install dependencies
+
+```bash
+pip install --upgrade pip
+pip install -r requirements.txt
+```
+
+#### 5. Start a tmux session
+
+```bash
+tmux new -s pydns
+```
+
+#### 6. Run PYDNS Scanner inside tmux
+
+```bash
+python -m python
+```
+
+#### 7. Detach from tmux without stopping the scan
+
+Press:
+
+```text
+Ctrl+b
+```
+
+Then press:
+
+```text
+d
+```
+
+Your scan will keep running in the background on the VPS.
+
+#### 8. Reconnect to the running scan
+
+```bash
+tmux attach -t pydns
+```
+
+#### Useful tmux commands
+
+```bash
+# List active tmux sessions
+tmux ls
+
+# Attach to a session
+tmux attach -t pydns
+
+# Kill the session when you are done
+tmux kill-session -t pydns
+```
+
+> Note: avoid `nohup` or `systemd` for the interactive TUI mode. Use `tmux` for VPS scanning. Use `systemd` only if a future non-interactive/headless mode is added.
+
+---
+
 ## 🎮 Usage
 
 ### Basic Usage
