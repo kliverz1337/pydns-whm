@@ -519,26 +519,26 @@ class ExtraTestsMixin:
     # ── WHM (Web Host Manager) detection ────────────────────────────────
 
     async def _test_whm(self, ip: str) -> None:
-        """Check whether the resolved IP hosts a WHM (cPanel Web Host Manager) panel.
+        """Check whether the DNS server IP itself hosts a WHM (cPanel Web Host Manager) panel.
 
         WHM panels are typically served on port 2086 (HTTP) or 2087 (HTTPS)
         and their login page contains distinctive markers like the title
         ``WHM`` or the cPanel branding in the HTML response.
 
-        The test resolves the DNS server's IP through itself first, then
-        attempts an HTTPS GET to ``https://<resolved_ip>:2087/`` looking for
-        WHM-specific content. Falls back to HTTP on port 2086 if HTTPS fails.
+        The test first verifies the DNS server can resolve (via _test_resolve),
+        then checks the DNS server's own IP for WHM on ports 2087/2086.
         """
         result: dict = {"whm": False, "hostname": ""}
         try:
-            # Use the resolved IP (from _test_resolve) as the target host
+            # Verify the DNS server can resolve (must have passed _test_resolve)
             resolved = self.resolve_results.get(ip, "")
             if not resolved or resolved == "-":
-                # No resolved IP available — skip WHM test
+                # DNS server couldn't resolve — skip WHM test
                 self.whm_results[ip] = result
                 return
 
-            target_ip = resolved.split(",")[0].strip()
+            # Check the DNS server's OWN IP for WHM (not the resolved domain IP)
+            target_ip = ip
 
             # Try HTTPS first (port 2087 — WHM secure)
             whm_found = False
