@@ -91,8 +91,13 @@ class ExtraTestsMixin:
                     await asyncio.gather(*tasks, return_exceptions=True)
 
                 # WHM test MUST run after resolve completes (depends on resolve_results)
-                if self.whm_test_enabled:
-                    self._log(f"[dim]🔍 WHM check: {dns_ip}...[/dim]")
+                whm_enabled = getattr(self, "whm_test_enabled", False)
+                resolved = self.resolve_results.get(dns_ip, "-")
+                self._log(
+                    f"[dim]🔍 WHM check: {dns_ip} | enabled={whm_enabled}"
+                    f" | resolved={resolved}[/dim]"
+                )
+                if whm_enabled:
                     await self._test_whm(dns_ip)
 
                 # Post-check: if the resolved IP is a bogon/private address
