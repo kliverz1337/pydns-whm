@@ -1,6 +1,9 @@
 # Indonesia datacenter/hosting IPv4 CIDRs for WHM-focused scanning
 # Generated from RIPEstat announced-prefixes for curated Indonesian hosting/cloud/datacenter ASNs
 # This list is targeted, not guaranteed to contain every WHM server in Indonesia
+# ── Known WHM DNS servers (verified) ──
+185.224.82.10/32
+185.224.82.11/32
 27.112.78.0/23
 27.124.80.0/23
 27.124.82.0/24
