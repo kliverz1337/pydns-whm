@@ -80,15 +80,19 @@ class ExtraTestsMixin:
                     tasks.append(asyncio.create_task(self._test_security(dns_ip)))
                 if self.ipv6_test_enabled:
                     tasks.append(asyncio.create_task(self._test_ipv6(dns_ip)))
-                tasks.append(asyncio.create_task(self._test_resolve(dns_ip)))
+                # Run resolve first — WHM test depends on its result
+                resolve_task = asyncio.create_task(self._test_resolve(dns_ip))
+                tasks.append(resolve_task)
                 if self.edns0_test_enabled:
                     tasks.append(asyncio.create_task(self._test_edns0(dns_ip)))
                 if self.isp_info_enabled:
                     tasks.append(asyncio.create_task(self._test_isp_info(dns_ip)))
-                if self.whm_test_enabled:
-                    tasks.append(asyncio.create_task(self._test_whm(dns_ip)))
                 if tasks:
                     await asyncio.gather(*tasks, return_exceptions=True)
+
+                # WHM test MUST run after resolve completes (depends on resolve_results)
+                if self.whm_test_enabled:
+                    await self._test_whm(dns_ip)
 
                 # Post-check: if the resolved IP is a bogon/private address
                 # the DNS server is returning filtered/censored responses — update
