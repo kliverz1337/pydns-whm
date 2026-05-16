@@ -24,6 +24,7 @@ from .extra_tests import ExtraTestsMixin
 from .results import ResultsMixin
 from .isp_cache import ISPCacheMixin
 from .ip_streaming import IPStreamingMixin
+from .whm_worker import WhmScanner
 
 __all__ = [
     # Constants / platform
@@ -39,6 +40,7 @@ __all__ = [
     # Standalone classes
     "SlipstreamManager",
     "SlipNetManager",
+    "WhmScanner",
     # Mixins
     "ConfigMixin",
     "ProxyTestingMixin",

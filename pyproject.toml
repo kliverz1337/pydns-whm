@@ -61,6 +61,8 @@ Issues = "https://github.com/xullexer/PYDNS-Scanner/issues"
 
 [project.scripts]
 pydns-scanner = "python:main"
+whm-scan = "python.whm_scan:main"
+whm-scanner-tui = "python.whm_tui:main"
 
 [tool.hatch.build.targets.sdist]
 include = [

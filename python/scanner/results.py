@@ -179,6 +179,51 @@ class ResultsMixin:
         if not self.table_needs_rebuild:
             return
         try:
+            from textual.widgets import DataTable
+            table = self.query_one("#results-table", DataTable)
+
+            # ── WHM-direct mode: use whm_results as primary data source ──
+            if getattr(self, "scan_mode", "dns") == "whm":
+                ips = list(self.whm_results.keys())
+                if not ips:
+                    table.clear(columns=True)
+                    for label, key, width in self._get_table_columns():
+                        table.add_column(label, key=key, width=width)
+                    table.cursor_type = "row"
+                    self.table_needs_rebuild = False
+                    return
+
+                def _whm_sort_key(ip):
+                    r = self.whm_results.get(ip, {})
+                    whm_rank = 0 if r.get("whm") else (1 if r.get("possible") else 2)
+                    return (whm_rank, ip)
+
+                sorted_ips = sorted(ips, key=_whm_sort_key)
+
+                scroll_x = table.scroll_x
+                scroll_y = table.scroll_y
+                table.clear(columns=True)
+                for label, key, width in self._get_table_columns():
+                    table.add_column(label, key=key, width=width)
+                table.cursor_type = "row"
+
+                for ip in sorted_ips:
+                    r = self.whm_results.get(ip, {})
+                    whm_str = self._get_whm_column(ip)
+                    hostname = r.get("hostname", "") or "-"
+                    port_str = str(r.get("port", "")) if r.get("port") else "-"
+                    isp_str = self._get_isp_column(ip)
+                    table.add_row(ip, whm_str, hostname, port_str, isp_str, key=ip)
+
+                try:
+                    table.scroll_x = scroll_x
+                    table.scroll_y = scroll_y
+                except Exception:
+                    pass
+                self.table_needs_rebuild = False
+                return
+
+            # ── DNS legacy mode ──
             ips = list(self.server_times.keys())
             finalized = [ip for ip in ips if self._is_ip_finalized(ip)]
             testing = [ip for ip in ips if not self._is_ip_finalized(ip)]
@@ -208,8 +253,6 @@ class ResultsMixin:
             sorted_final = sorted(finalized, key=_sort_key)
             sorted_testing = sorted(testing, key=_sort_key)
 
-            from textual.widgets import DataTable
-            table = self.query_one("#results-table", DataTable)
             scroll_x = table.scroll_x
             scroll_y = table.scroll_y
 
@@ -417,26 +460,13 @@ class ResultsMixin:
 
         try:
             with open(txt_file, "w", encoding="utf-8") as f:
-                f.write(f"WHM Detection Results\n")
-                f.write(f"{'=' * 40}\n")
-                f.write(f"Scan: {timestamp.replace('_', ' ')}\n")
-                f.write(f"WHM Servers Found: {len(whm_servers)}\n\n")
-
                 for ip, info in whm_servers.items():
-                    hostname = info.get("hostname", "")
-                    resolved = self.resolve_results.get(ip, "")
-                    isp = self.isp_results.get(ip, {})
-                    org = isp.get("org", "") or ""
-                    if org == "-":
-                        org = ""
-                    f.write(f"DNS IP   : {ip}\n")
-                    if resolved:
-                        f.write(f"Resolved : {resolved}\n")
+                    port = info.get("port", "")
+                    hostname = str(info.get("hostname", "") or "").strip()
+                    line = f"{ip}:{port}"
                     if hostname:
-                        f.write(f"Hostname : {hostname}\n")
-                    if org:
-                        f.write(f"ISP      : {org}\n")
-                    f.write(f"{'-' * 40}\n\n")
+                        line += f"  # {hostname}"
+                    f.write(line + "\n")
 
             self._log(f"[green]✓ WHM results saved to: {txt_file}[/green]")
             logger.info(f"WHM results saved to {txt_file}")

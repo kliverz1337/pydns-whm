@@ -402,6 +402,43 @@ This will launch the interactive TUI where you can configure:
 - **Random Subdomain**: Add random prefix to avoid cached responses
 - **Scan Mode**: Choose Slipstream (proxy test), SlipNet (DNSTT/NoiseDNS), or DNS Scan (lightweight)
 
+### Dedicated WHM Scanner TUI
+
+For focused WHM/cPanel discovery without DNS-first filtering, launch the dedicated WHM TUI:
+
+```bash
+whm-scanner-tui
+```
+
+From source:
+
+```bash
+python3 -m python.whm_tui
+```
+
+The WHM TUI keeps the same dark visual style, stats panel, log panel, results table, and pause/resume/save controls as the main PYDNS TUI, but exposes WHM-specific inputs:
+
+- **CIDR / Target File** — built-in target files or a custom CIDR file
+- **Concurrency** — maximum simultaneous WHM probes
+- **HTTP Timeout** and **TCP Timeout** — probe timeout controls
+- **Output TXT** — destination file for WHM-positive results
+- **Verbose Log** — show/hide detailed scan log noise
+
+WHM TXT output is one server per line:
+
+```text
+185.224.82.10:2087  # WHM Login
+185.224.82.11:2087  # WHM Login
+```
+
+If no hostname/title is detected, the line is saved as `ip:port` only.
+
+Headless CLI is still available:
+
+```bash
+whm-scan --cidr python/whm-test-targets.cidrs --output results/whm.txt
+```
+
 ### CIDR File Format
 
 Create a text file with one CIDR range per line:

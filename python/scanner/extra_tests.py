@@ -525,72 +525,159 @@ class ExtraTestsMixin:
     # ── WHM (Web Host Manager) detection ────────────────────────────────
 
     async def _test_whm(self, ip: str) -> None:
-        """Check whether the DNS server IP itself hosts a WHM (cPanel Web Host Manager) panel.
+        """Detect WHM/cPanel more accurately on DNS and hosting target IPs.
 
-        WHM panels are typically served on port 2086 (HTTP) or 2087 (HTTPS)
-        and their login page contains distinctive markers like the title
-        ``WHM`` or the cPanel branding in the HTML response.
-
-        The test first verifies the DNS server can resolve (via _test_resolve),
-        then checks the DNS server's own IP for WHM on ports 2087/2086.
+        The detector checks the DNS server IP itself and, when the scan domain is
+        a real user-provided domain, also checks the resolved A-record targets.
+        It performs a cheap TCP pre-check before HTTP probing, tries common WHM
+        paths, follows redirects, scans a larger response body, and records the
+        exact target/port/path where WHM was found.
         """
-        result: dict = {"whm": False, "hostname": ""}
-        try:
-            # Verify the DNS server can resolve (must have passed _test_resolve)
+        import re as _re
+
+        result: dict = {
+            "whm": False,
+            "hostname": "",
+            "target": "",
+            "port": None,
+            "path": "",
+            "possible": False,
+            "open_ports": [],
+        }
+
+        whm_markers = (
+            "whm",
+            "web host manager",
+            "cpanel",
+            "whm-login",
+            "cpsrvd",
+            "cpsession",
+            "cpsess",
+            "login_theme",
+            "security token",
+            "server login",
+            "powered by cpanel",
+            "copyright cpanel",
+        )
+        paths = ("/", "/login", "/whm", "/cpanel")
+        ports = ((2087, True), (2086, False))
+
+        async def _tcp_port_open(target: str, port: int) -> bool:
+            try:
+                reader, writer = await asyncio.wait_for(
+                    asyncio.open_connection(target, port), timeout=3.0
+                )
+                writer.close()
+                try:
+                    await writer.wait_closed()
+                except Exception:
+                    pass
+                try:
+                    reader.feed_eof()
+                except Exception:
+                    pass
+                return True
+            except Exception:
+                return False
+
+        def _extract_title(body: str) -> str:
+            title_match = _re.search(r"<title>\s*(.*?)\s*</title>", body, _re.IGNORECASE | _re.DOTALL)
+            if not title_match:
+                return ""
+            return " ".join(title_match.group(1).split())[:120]
+
+        def _resolved_targets() -> list[str]:
             resolved = self.resolve_results.get(ip, "")
             if not resolved or resolved == "-":
-                # DNS server couldn't resolve — skip WHM test
-                self.whm_results[ip] = result
-                return
+                return []
 
-            # Check the DNS server's OWN IP for WHM (not the resolved domain IP)
-            target_ip = ip
+            # Avoid repeatedly probing Google/default domain answers during broad
+            # DNS scans. Resolved targets are useful when the user entered a real
+            # hosting domain, but default google.com answers create huge duplicate
+            # probes unrelated to WHM discovery.
+            domain = (getattr(self, "domain", "") or "").strip().lower().rstrip(".")
+            if domain in ("", "google.com", "example.com"):
+                return []
 
-            # Try HTTPS first (port 2087 — WHM secure)
-            whm_found = False
-            hostname = ""
-            for port, use_https in [(2087, True), (2086, False)]:
-                try:
-                    scheme = "https" if use_https else "http"
-                    url = f"{scheme}://{target_ip}:{port}/"
-                    async with httpx.AsyncClient(
-                        verify=False,  # WHM often uses self-signed certs
-                        timeout=httpx.Timeout(5.0, connect=3.0),
-                        follow_redirects=True,
-                        limits=httpx.Limits(max_connections=2),
-                    ) as client:
-                        resp = await client.get(url)
-                        body = resp.text[:4096]  # Only inspect first 4KB
+            targets: list[str] = []
+            for part in resolved.split(","):
+                candidate = part.strip()
+                if candidate and candidate not in targets:
+                    targets.append(candidate)
+            return targets[:3]
 
-                        # WHM login page indicators:
-                        # - Title contains "WHM" or "Web Host Manager"
-                        # - cPanel/WHM branding in meta or body
-                        # - Known WHM login form patterns
-                        if any(marker in body for marker in (
-                            "WHM", "Web Host Manager", "cPanel",
-                            "whm-login", "cpsrvd",
-                        )):
-                            whm_found = True
-                            # Try to extract hostname from title or meta
-                            import re as _re
-                            title_match = _re.search(
-                                r"<title>(.*?)</title>", body, _re.IGNORECASE
-                            )
-                            if title_match:
-                                hostname = title_match.group(1).strip()
+        targets: list[str] = [ip]
+        for candidate in _resolved_targets():
+            if candidate != ip and candidate not in targets:
+                targets.append(candidate)
+
+        try:
+            async with httpx.AsyncClient(
+                verify=False,
+                timeout=httpx.Timeout(8.0, connect=5.0),
+                follow_redirects=True,
+                limits=httpx.Limits(max_connections=4),
+                headers={"User-Agent": "Mozilla/5.0 PYDNS-WHM-Detector/1.0"},
+            ) as client:
+                for target_ip in targets:
+                    for port, use_https in ports:
+                        if not await _tcp_port_open(target_ip, port):
+                            continue
+
+                        result["open_ports"].append(f"{target_ip}:{port}")
+                        scheme = "https" if use_https else "http"
+
+                        for path in paths:
+                            url = f"{scheme}://{target_ip}:{port}{path}"
+                            try:
+                                resp = await client.get(url)
+                                body = resp.text[:16384]
+                                body_lc = body.lower()
+                                final_url = str(resp.url).lower()
+
+                                marker_found = any(marker in body_lc for marker in whm_markers)
+                                url_hint = any(token in final_url for token in ("cpsess", "whm", "cpanel"))
+                                status_hint = resp.status_code in (401, 403) and port in (2086, 2087)
+
+                                if marker_found or url_hint:
+                                    hostname = _extract_title(body)
+                                    result = {
+                                        "whm": True,
+                                        "hostname": hostname or "WHM Login",
+                                        "target": target_ip,
+                                        "port": port,
+                                        "path": path,
+                                        "possible": True,
+                                        "open_ports": result.get("open_ports", []),
+                                    }
+                                    self._log(
+                                        f"[green]✓ {ip}: WHM detected on {target_ip}:{port}{path}"
+                                        f"{f' — {result['hostname']}' if result['hostname'] else ''}[/green]"
+                                    )
+                                    self.whm_results[ip] = result
+                                    break
+
+                                if status_hint:
+                                    result["possible"] = True
+                            except (httpx.TimeoutException, httpx.ConnectError, httpx.ProtocolError):
+                                continue
+                            except Exception as e:
+                                logger.debug(f"WHM HTTP probe error for {target_ip}:{port}{path}: {e}")
+                                continue
+
+                            if result.get("whm"):
+                                break
+                        if result.get("whm"):
                             break
-                except (httpx.TimeoutException, httpx.ConnectError,
-                        httpx.HTTPStatusError, Exception):
-                    continue
+                    if result.get("whm"):
+                        break
 
-            result = {"whm": whm_found, "hostname": hostname}
-            if whm_found:
-                self._log(
-                    f"[green]✓ {ip}: WHM detected on {target_ip}"
-                    f"{f' — {hostname}' if hostname else ''}[/green]"
-                )
-            else:
-                self._log(f"[dim]{ip}: No WHM on {target_ip}[/dim]")
+            if not result.get("whm"):
+                open_ports = ", ".join(result.get("open_ports", []))
+                if result.get("possible"):
+                    self._log(f"[yellow]{ip}: WHM possible; protected response on {open_ports}[/yellow]")
+                else:
+                    self._log(f"[dim]{ip}: No WHM found{f' (open: {open_ports})' if open_ports else ''}[/dim]")
 
         except Exception as e:
             logger.debug(f"WHM test error for {ip}: {e}")

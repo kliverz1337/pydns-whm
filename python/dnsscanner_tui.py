@@ -486,6 +486,15 @@ class DNSScannerTUI(
         align: center top;
     }
 
+    #whm-fields-container {
+        display: none;
+        height: auto;
+        padding: 0 2;
+        margin: 0 0 1 0;
+        border: solid #30363d;
+        background: #0d1117;
+    }
+
     #advanced-settings-container {
         display: none;
         height: auto;
@@ -546,6 +555,9 @@ class DNSScannerTUI(
         # Scan strategy: "shuffle" (random order) or "redis" (pincer from edges)
         self.scan_strategy = "redis"
 
+        # Scan mode: "dns" (legacy DNS-first) or "whm" (WHM-direct, no DNS gate)
+        self.scan_mode: str = "dns"
+
         # Scan preset settings
         self.scan_preset = "fast"  # "fast", "deep", "full", "whm"
         self.preset_max_ips = 0  # 0 = unlimited
@@ -563,6 +575,11 @@ class DNSScannerTUI(
         self.edns0_test_enabled = True  # EDNS0 support test
         self.isp_info_enabled = True  # AS/ISP information lookup
         self.whm_test_enabled = True  # WHM (Web Host Manager) detection
+
+        # WHM-direct scan settings
+        self._whm_http_timeout: float = 8.0
+        self._whm_tcp_timeout: float = 3.0
+        self._whm_concurrency: int = 100
 
         # Advanced test results storage
         self.security_results: dict[str, dict] = {}  # IP -> {dnssec, hijacked, open, filtered}
@@ -671,6 +688,17 @@ class DNSScannerTUI(
                             id="input-cidr-select",
                         )
                     with Vertical(classes="form-field"):
+                        yield Label("Scan Type:", classes="field-label")
+                        yield Select(
+                            [
+                                ("DNS Scanner (legacy)", "dns"),
+                                ("WHM Scanner (direct)", "whm"),
+                            ],
+                            value="dns",
+                            allow_blank=False,
+                            id="input-scan-mode",
+                        )
+                    with Vertical(classes="form-field"):
                         yield Label("Scan Mode:", classes="field-label")
                         yield Select(
                             [
@@ -776,6 +804,31 @@ class DNSScannerTUI(
                     yield Checkbox("WHM Detect", value=self.whm_test_enabled, id="input-whm")
                     yield Checkbox("Bell on Pass", id="input-bell")
                     yield Checkbox("Advanced", id="input-show-advanced")
+
+                with Container(id="whm-fields-container"):
+                    with Horizontal(classes="form-row"):
+                        with Vertical(classes="form-field"):
+                            yield Label("WHM HTTP Timeout (s):", classes="field-label")
+                            yield Input(
+                                placeholder="8.0",
+                                id="input-whm-http-timeout",
+                                value="8.0",
+                            )
+                        with Vertical(classes="form-field"):
+                            yield Label("WHM TCP Timeout (s):", classes="field-label")
+                            yield Input(
+                                placeholder="3.0",
+                                id="input-whm-tcp-timeout",
+                                value="3.0",
+                            )
+                    with Horizontal(classes="form-row"):
+                        with Vertical(classes="form-field"):
+                            yield Label("WHM Concurrency:", classes="field-label")
+                            yield Input(
+                                placeholder="100",
+                                id="input-whm-concurrency",
+                                value="100",
+                            )
 
                 with Container(id="advanced-settings-container"):
                     with Horizontal(classes="form-row"):
@@ -923,6 +976,16 @@ class DNSScannerTUI(
             if config.get("concurrency"):
                 concurrency_input = self.query_one("#input-concurrency", Input)
                 concurrency_input.value = str(config["concurrency"])
+
+            # Scan Mode (dns or whm)
+            if config.get("scan_mode"):
+                self.scan_mode = config["scan_mode"]
+                try:
+                    scan_mode_select = self.query_one("#input-scan-mode", Select)
+                    scan_mode_select.value = self.scan_mode
+                    self._toggle_scan_mode(self.scan_mode)
+                except Exception:
+                    pass
 
             # Scan Preset
             if config.get("scan_preset"):
@@ -1081,6 +1144,17 @@ class DNSScannerTUI(
 
     def _get_table_columns(self) -> list[tuple[str, str, int | None]]:
         """Return list of (label, key, width) for unified results table."""
+        # WHM-direct mode: simplified columns
+        if self.scan_mode == "whm":
+            return [
+                ("IP Address", "ip", None),
+                ("WHM", "whm", None),
+                ("Hostname", "hostname", 30),
+                ("Port", "port", None),
+                ("ISP", "isp", 50),
+            ]
+
+        # DNS legacy mode: full columns
         cols: list[tuple[str, str, int | None]] = []
         if self.test_slipstream:
             cols.append(("Proxy", "proxy", 12))
@@ -1335,9 +1409,43 @@ class DNSScannerTUI(
             ]:
                 self._processing_button = False
 
+    def _toggle_scan_mode(self, mode: str) -> None:
+        """Show/hide form fields based on scan mode (dns vs whm)."""
+        is_whm = mode == "whm"
+        try:
+            # DNS-specific fields
+            self.query_one("#protocol-auth-section").display = not is_whm
+            for row in self.query(".domain-row"):
+                row.display = not is_whm
+            self.query_one("#slipnet-fields-container").display = not is_whm
+            self.query_one("#socks5-auth-container").display = not is_whm
+            self.query_one("#ssh-auth-container").display = not is_whm
+            self.query_one("#input-slipstream", Checkbox).display = not is_whm
+            self.query_one("#input-show-advanced", Checkbox).display = not is_whm
+            self.query_one("#input-bell").display = not is_whm
+            self.query_one("#input-whm", Checkbox).display = not is_whm
+            # WHM-specific fields
+            self.query_one("#whm-fields-container").display = is_whm
+            # When WHM mode, force WHM detection on
+            if is_whm:
+                self.whm_test_enabled = True
+        except Exception as e:
+            logger.debug(f"Could not toggle scan mode UI: {e}")
+
     def on_select_changed(self, event: Select.Changed) -> None:
         """Handle dropdown selection changes."""
-        if event.select.id == "input-cidr-select":
+        if event.select.id == "input-scan-mode":
+            self.scan_mode = str(event.value) if event.value else "dns"
+            self._toggle_scan_mode(self.scan_mode)
+            # Auto-select appropriate preset
+            if self.scan_mode == "whm":
+                try:
+                    preset = self.query_one("#input-preset", Select)
+                    preset.value = "whm"
+                    self._apply_scan_preset()
+                except Exception:
+                    pass
+        elif event.select.id == "input-cidr-select":
             browser = self.query_one("#file-browser-container")
             if event.value == "custom":
                 # Show file browser when Custom is selected
@@ -1694,6 +1802,7 @@ class DNSScannerTUI(
             self.preset_auto_shuffle = True
             self.whm_test_enabled = True
             self.scan_strategy = "redis"  # Pincer coverage pattern
+            self.scan_mode = "whm"  # Force WHM-direct mode
         else:  # Default to fast
             self.preset_max_ips = 25000
             self.preset_shuffle_threshold = 500
@@ -1709,6 +1818,31 @@ class DNSScannerTUI(
         slipstream_checkbox = self.query_one("#input-slipstream", Checkbox)
         whm_checkbox = self.query_one("#input-whm", Checkbox)
         bell_checkbox = self.query_one("#input-bell", Checkbox)
+
+        # Read scan mode from form
+        try:
+            scan_mode_select = self.query_one("#input-scan-mode", Select)
+            self.scan_mode = str(scan_mode_select.value) if scan_mode_select.value else "dns"
+        except Exception:
+            self.scan_mode = "dns"
+
+        # Read WHM-specific fields
+        if self.scan_mode == "whm":
+            try:
+                whm_http_str = self.query_one("#input-whm-http-timeout", Input).value.strip()
+                self._whm_http_timeout = float(whm_http_str) if whm_http_str else 8.0
+            except (ValueError, Exception):
+                self._whm_http_timeout = 8.0
+            try:
+                whm_tcp_str = self.query_one("#input-whm-tcp-timeout", Input).value.strip()
+                self._whm_tcp_timeout = float(whm_tcp_str) if whm_tcp_str else 3.0
+            except (ValueError, Exception):
+                self._whm_tcp_timeout = 3.0
+            try:
+                whm_conc_str = self.query_one("#input-whm-concurrency", Input).value.strip()
+                self._whm_concurrency = int(whm_conc_str) if whm_conc_str else 100
+            except (ValueError, Exception):
+                self._whm_concurrency = 100
 
         # Determine CIDR file based on dropdown selection
         cidr_value = str(cidr_select.value) if cidr_select.value else "iran"
@@ -1981,6 +2115,7 @@ class DNSScannerTUI(
             "domain": self.domain,
             "cidr_selection": cidr_value,
             "selected_cidr_file": self.selected_cidr_file,
+            "scan_mode": self.scan_mode,
             "scan_preset": self.scan_preset,
             "concurrency": self.concurrency,
             "proxy_auth_enabled": self.proxy_auth_enabled,
@@ -2012,6 +2147,33 @@ class DNSScannerTUI(
         }
         self._save_config(config)
 
+        # ── WHM-Direct mode: skip tunnel client, go straight to WHM scan ──
+        if self.scan_mode == "whm":
+            # Switch to scan screen
+            self.query_one("#start-screen").display = False
+            self.query_one("#scan-screen").display = True
+
+            try:
+                self.query_one("#pause-btn", Button).display = True
+                self.query_one("#resume-btn", Button).display = False
+            except Exception as e:
+                logger.debug(f"Could not update button visibility: {e}")
+
+            log_widget = self.query_one("#log-display", RichLog)
+            log_widget.write("[bold cyan]PYDNS WHM Scanner Log[/bold cyan]")
+            log_widget.write(f"[yellow]Subnet file:[/yellow] {self.subnet_file}")
+            log_widget.write(f"[yellow]WHM HTTP Timeout:[/yellow] {self._whm_http_timeout}s")
+            log_widget.write(f"[yellow]WHM TCP Timeout:[/yellow] {self._whm_tcp_timeout}s")
+            log_widget.write(f"[yellow]WHM Concurrency:[/yellow] {self._whm_concurrency}")
+            log_widget.write(f"[yellow]Scan Preset:[/yellow] {self._preset_display_name()}")
+            log_widget.write("[green]Starting WHM-direct scan...[/green]\n")
+
+            self.scan_started = True
+            self._update_keybinding_visibility(scanning=True, paused=False)
+            self.run_worker(self._scan_whm_direct(), exclusive=True)
+            return
+
+        # ── DNS legacy mode ──
         # Check tunnel client version and download if needed
         if self.test_slipstream:
             protocol_name = "SlipNet" if self.active_protocol == "slipnet" else "Slipstream"
@@ -2435,6 +2597,162 @@ class DNSScannerTUI(
             self._log(f"[green]OS MTU set to {mtu} on '{iface}' (was {self._original_mtu})[/green]")
         else:
             logger.info(f"OS MTU reverted to {mtu} on '{iface}'")
+
+    async def _scan_whm_direct(self) -> None:
+        """WHM-direct scan loop — no DNS gate, probes every IP for WHM."""
+        from .scanner.whm_worker import WhmScanner
+
+        # Reset WHM state
+        self.whm_results.clear()
+        self.found_servers.clear()
+        self.server_times.clear()
+        self.current_scanned = 0
+        self.table_needs_rebuild = False
+        self.ips_since_last_found = 0
+        self.auto_shuffle_count = 0
+        self._passed_count = 0
+        self._failed_count = 0
+
+        # Reset pause state
+        self.is_paused = False
+        self.pause_event = asyncio.Event()
+        self.pause_event.set()
+
+        # Initialize shuffle signal
+        self.shuffle_signal = asyncio.Event()
+
+        # Start periodic timers
+        self.start_time = time.time()
+        self.last_update_time = self.start_time
+        self.last_table_update_time = self.start_time
+        self._sort_refresh_timer = self.set_interval(3.0, self._periodic_sort_refresh)
+        self._stats_refresh_timer = self.set_interval(0.5, self._tick_stats)
+
+        # Count total IPs
+        loop = asyncio.get_running_loop()
+        total_ips = await loop.run_in_executor(
+            None, self._count_total_ips_fast, self.subnet_file
+        )
+        if total_ips == 0:
+            self._log("[red]ERROR: No valid IPs found in CIDR file![/red]")
+            self.notify("No valid IPs! Check CIDR file format.", severity="error")
+            return
+
+        effective_total = total_ips
+        if self.preset_max_ips > 0:
+            effective_total = min(total_ips, self.preset_max_ips)
+            self._log(f"[cyan]Found {total_ips:,} IPs. Limited to {effective_total:,}.[/cyan]")
+        else:
+            self._log(f"[cyan]Found {total_ips:,} IPs. Starting WHM-direct scan...[/cyan]")
+
+        try:
+            stats = self._stats_widget
+            if stats is not None:
+                stats.update_stats(
+                    total=effective_total,
+                    bar_progress=0.0,
+                    bar_total=float(effective_total),
+                )
+        except Exception:
+            pass
+
+        # Create WhmScanner engine
+        scanner = WhmScanner(
+            concurrency=self._whm_concurrency,
+            http_timeout=self._whm_http_timeout,
+            tcp_timeout=self._whm_tcp_timeout,
+            pause_event=self.pause_event,
+            progress_callback=self._on_whm_probe_complete,
+        )
+        await scanner.start()
+
+        try:
+            # Stream IPs using redis pincer strategy
+            async for ip_batch in self._stream_ips_redis_style():
+                if self._shutdown_event and self._shutdown_event.is_set():
+                    break
+
+                # Probe batch
+                results = await scanner.scan_batch(ip_batch)
+
+                # Process results
+                for ip, result in results.items():
+                    self.current_scanned += 1
+                    if result.get("whm"):
+                        self.whm_results[ip] = result
+                        self._passed_count += 1
+                        self.ips_since_last_found = 0
+                        hostname = result.get('hostname', '')
+                        self._log(
+                            f"[green]✓ WHM: {ip}:{result.get('port')}"
+                            f"{f' — {hostname}' if hostname else ''}[/green]"
+                        )
+                    elif result.get("possible"):
+                        self.whm_results[ip] = result
+                        self._log(f"[yellow]⚠ WHM possible: {ip}:{result.get('port')}[/yellow]")
+                    else:
+                        self.ips_since_last_found += 1
+
+                    # Auto-shuffle
+                    if (
+                        self.preset_auto_shuffle
+                        and self.preset_shuffle_threshold > 0
+                        and self.ips_since_last_found >= self.preset_shuffle_threshold
+                        and not self.is_paused
+                    ):
+                        self.auto_shuffle_count += 1
+                        self.ips_since_last_found = 0
+                        self._log(
+                            f"[yellow]Auto-shuffle: No WHM in {self.preset_shuffle_threshold} IPs[/yellow]"
+                        )
+                        self.shuffle_signal.set()
+                        break  # Break inner loop to trigger reshuffle
+
+                # Periodic table rebuild
+                if self.current_scanned % 50 == 0:
+                    self.table_needs_rebuild = True
+                    self._rebuild_table()
+
+                # Check shuffle signal
+                if self.shuffle_signal.is_set():
+                    self.shuffle_signal.clear()
+                    continue
+
+                await asyncio.sleep(0)
+
+        finally:
+            await scanner.stop()
+
+        # Final table rebuild
+        self.table_needs_rebuild = True
+        self._rebuild_table()
+
+        # Auto-save WHM results
+        self._auto_save_results()
+
+        # Stop timers
+        if hasattr(self, "_sort_refresh_timer") and self._sort_refresh_timer:
+            self._sort_refresh_timer.stop()
+        if hasattr(self, "_stats_refresh_timer") and self._stats_refresh_timer:
+            self._stats_refresh_timer.stop()
+
+        self.notify(
+            f"WHM scan complete! Found {self._get_whm_count()} WHM servers.",
+            severity="information",
+        )
+
+    async def _on_whm_probe_complete(self, ip: str, result: dict) -> None:
+        """Callback invoked by WhmScanner after each probe completes."""
+        # Update stats widget
+        try:
+            stats = self._stats_widget
+            if stats is not None:
+                stats.update_stats(
+                    scanned=self.current_scanned,
+                    whm=self._get_whm_count(),
+                )
+        except Exception:
+            pass
 
     async def _scan_async(self) -> None:
         """Async scanning logic with instant shuffle support."""
