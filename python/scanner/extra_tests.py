@@ -650,9 +650,11 @@ class ExtraTestsMixin:
                                         "possible": True,
                                         "open_ports": result.get("open_ports", []),
                                     }
+                                    result_hostname = result.get("hostname", "")
+                                    hostname_suffix = f" — {result_hostname}" if result_hostname else ""
                                     self._log(
                                         f"[green]✓ {ip}: WHM detected on {target_ip}:{port}{path}"
-                                        f"{f' — {result['hostname']}' if result['hostname'] else ''}[/green]"
+                                        f"{hostname_suffix}[/green]"
                                     )
                                     self.whm_results[ip] = result
                                     break

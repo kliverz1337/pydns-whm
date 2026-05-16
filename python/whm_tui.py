@@ -517,10 +517,10 @@ class WHMScannerTUI(App):
     def _setup_table(self) -> None:
         table = self.query_one("#results-table", DataTable)
         table.clear(columns=True)
-        table.add_column("IP Address", key="ip")
-        table.add_column("WHM", key="whm")
-        table.add_column("Port", key="port")
-        table.add_column("Open Ports", key="open_ports", width=28)
+        table.add_column("IP Address", key="ip", width=22)
+        table.add_column("WHM", key="whm", width=12)
+        table.add_column("Port", key="port", width=12)
+        table.add_column("Open Ports", key="open_ports", width=56)
         table.cursor_type = "row"
 
     def on_select_changed(self, event: Select.Changed) -> None:
