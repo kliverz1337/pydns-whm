@@ -321,7 +321,6 @@ class WHMScannerTUI(App):
     #results {
         width: 100%;
         height: 1fr;
-        border: solid #00c96b;
         background: #06120c;
         margin: 0 1;
         padding: 1;
@@ -519,8 +518,10 @@ class WHMScannerTUI(App):
         table.clear(columns=True)
         table.add_column("IP Address", key="ip")
         table.add_column("WHM", key="whm")
+        table.add_column("Hostname", key="hostname", width=30)
         table.add_column("Port", key="port")
-        table.add_column("Open Ports", key="open_ports", width=28)
+        table.add_column("Path", key="path")
+        table.add_column("Open Ports", key="open_ports", width=24)
         table.cursor_type = "row"
 
     def on_select_changed(self, event: Select.Changed) -> None:
@@ -779,14 +780,16 @@ class WHMScannerTUI(App):
 
     def _add_result_row(self, ip: str, result: WhmResult, whm_status: str) -> None:
         table = self.query_one("#results-table", DataTable)
+        hostname = str(result.get("hostname", "") or "-")
         port = str(result.get("port", "") or "-")
+        path = str(result.get("path", "") or "-")
         open_ports = ", ".join(result.get("open_ports", []) or []) or "-"
         try:
             if ip in table.rows:
                 table.remove_row(ip)
         except Exception:
             pass
-        table.add_row(ip, whm_status, port, open_ports, key=ip)
+        table.add_row(ip, whm_status, hostname, port, path, open_ports, key=ip)
 
     def _tick_stats(self) -> None:
         status = "Paused" if self.is_paused else ("Running" if self.scan_started else "Idle")
