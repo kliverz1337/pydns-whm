@@ -421,8 +421,16 @@ The WHM TUI keeps the same dark visual style, stats panel, log panel, results ta
 - **CIDR / Target File** — built-in target files or a custom CIDR file
 - **Concurrency** — maximum simultaneous WHM probes
 - **HTTP Timeout** and **TCP Timeout** — probe timeout controls
-- **Output TXT** — destination file for WHM-positive results
 - **Verbose Log** — show/hide detailed scan log noise
+
+The TUI automatically creates result files under `results/` using the next available scan number:
+
+- `WHM_N.txt` — confirmed WHM servers, saved in realtime as each WHM target is detected
+- `LIVE_N.txt` — IPs with an open WHM port (`2087` or `2086`), saved in realtime
+- `WHM_N_checkpoint.txt` — scanned IP checkpoint for interrupted scan resume
+- `WHM_N.done` — completion marker so finished scans are not resumed accidentally
+
+If a previous `WHM_N_checkpoint.txt` exists without `WHM_N.done`, the next TUI run resumes that interrupted scan and skips already scanned IPs.
 
 WHM TXT output is one server per line:
 
@@ -431,7 +439,7 @@ WHM TXT output is one server per line:
 185.224.82.11:2087  # WHM Login
 ```
 
-If no hostname/title is detected, the line is saved as `ip:port` only.
+If no hostname/title is detected, the line is saved as `ip:port` only. The live-IP file stores plain IP addresses only for targets with an open WHM port (`2087` or `2086`).
 
 Headless CLI is still available:
 

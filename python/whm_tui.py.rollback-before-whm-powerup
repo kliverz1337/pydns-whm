@@ -426,9 +426,6 @@ class WHMScannerTUI(App):
         self.selected_cidr_file = ""
         self.subnet_file = ""
         self.output_path = ""
-        self.live_output_path = ""
-        self.checkpoint_path = ""
-        self.done_marker_path = ""
         self.concurrency = 100
         self.http_timeout = 10.0
         self.tcp_timeout = 5.0
@@ -436,9 +433,6 @@ class WHMScannerTUI(App):
         self.verbose = True
 
         self.results: dict[str, WhmResult] = {}
-        self.scanned_ips: set[str] = set()
-        self.resume_scanned_ips: set[str] = set()
-        self.live_count = 0
         self.scanned = 0
         self.whm_count = 0
         self.possible_count = 0
@@ -454,7 +448,6 @@ class WHMScannerTUI(App):
         self._stats_timer = None
         self._processing_button = False
         self._autosaved_whm_keys: set[str] = set()
-        self._autosaved_live_keys: set[str] = set()
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=False)
@@ -526,10 +519,9 @@ class WHMScannerTUI(App):
         table = self.query_one("#results-table", DataTable)
         table.clear(columns=True)
         table.add_column("IP Address", key="ip", width=22)
-        table.add_column("WHM", key="whm", width=10)
-        table.add_column("Port", key="port", width=10)
-        table.add_column("Conf", key="confidence", width=10)
-        table.add_column("Open Ports", key="open_ports", width=50)
+        table.add_column("WHM", key="whm", width=12)
+        table.add_column("Port", key="port", width=12)
+        table.add_column("Open Ports", key="open_ports", width=56)
         table.cursor_type = "row"
 
     def on_select_changed(self, event: Select.Changed) -> None:
@@ -608,34 +600,19 @@ class WHMScannerTUI(App):
         raise ValueError("Please select a valid CIDR file")
 
     def _next_output_path(self) -> Path:
-        """Return a resumable WHM output path or the next fresh automatic path."""
+        """Return the next available automatic WHM output path."""
         output_dir = Path("results")
         output_dir.mkdir(parents=True, exist_ok=True)
         index = 1
         while True:
             output = output_dir / f"WHM_{index}.txt"
-            checkpoint = output_dir / f"WHM_{index}_checkpoint.txt"
-            done_marker = output_dir / f"WHM_{index}.done"
-            if checkpoint.exists() and not done_marker.exists():
-                return output
-            if not output.exists() and not checkpoint.exists():
+            if not output.exists():
                 return output
             index += 1
-
-    def _derive_scan_output_paths(self) -> None:
-        """Derive companion realtime output files from the main WHM TXT path."""
-        output = Path(self.output_path)
-        stem = output.stem
-        suffix = output.suffix or ".txt"
-        live_index = stem.removeprefix("WHM_")
-        self.live_output_path = str(output.with_name(f"LIVE_{live_index}{suffix}"))
-        self.checkpoint_path = str(output.with_name(f"{stem}_checkpoint.txt"))
-        self.done_marker_path = str(output.with_name(f"{stem}.done"))
 
     def _read_form(self) -> None:
         self.subnet_file = self._resolve_cidr_file()
         self.output_path = str(self._next_output_path())
-        self._derive_scan_output_paths()
         self.concurrency = max(1, int(self.query_one("#input-concurrency", Input).value.strip() or "100"))
         self.http_timeout = max(0.1, float(self.query_one("#input-http-timeout", Input).value.strip() or "10"))
         self.tcp_timeout = max(0.1, float(self.query_one("#input-tcp-timeout", Input).value.strip() or "5"))
@@ -712,11 +689,7 @@ class WHMScannerTUI(App):
         self.pause_event = asyncio.Event()
         self.pause_event.set()
         self.results.clear()
-        self.scanned_ips.clear()
-        self.resume_scanned_ips.clear()
         self._autosaved_whm_keys.clear()
-        self._autosaved_live_keys.clear()
-        self.live_count = 0
         self.scanned = 0
         self.whm_count = 0
         self.possible_count = 0
@@ -725,7 +698,6 @@ class WHMScannerTUI(App):
         self.start_time = time.monotonic()
         self._setup_table()
         self._stats_timer = self.set_interval(0.5, self._tick_stats)
-        self._load_resume_checkpoint()
         self._prepare_realtime_output()
 
         try:
@@ -739,8 +711,6 @@ class WHMScannerTUI(App):
                 self.notify("No valid targets found", severity="error")
                 return
 
-            if self.resume_scanned_ips:
-                self._log(f"[cyan]Resume checkpoint: skipping {len(self.resume_scanned_ips):,} already scanned IPs[/cyan]")
             self._log(f"[cyan]Targets: {self.total_targets:,} | Concurrency: {self.concurrency} | HTTP: {self.http_timeout}s | TCP: {self.tcp_timeout}s[/cyan]")
             self._update_stats(status="Running", total=self.total_targets)
 
@@ -758,10 +728,6 @@ class WHMScannerTUI(App):
                         break
                     if self.pause_event:
                         await self.pause_event.wait()
-                    ip_batch = [ip for ip in ip_batch if ip not in self.resume_scanned_ips]
-                    if not ip_batch:
-                        await asyncio.sleep(0)
-                        continue
                     batch_results = await scanner.scan_batch(ip_batch)
                     for ip, result in batch_results.items():
                         self.scanned += 1
@@ -772,9 +738,8 @@ class WHMScannerTUI(App):
                 await scanner.stop()
 
             self._update_stats(status="Finished")
-            self._log(f"[green]Scan complete. WHM confirmed: {self.whm_count}, possible: {self.possible_count}, live IPs: {self.live_count}[/green]")
+            self._log(f"[green]Scan complete. WHM confirmed: {self.whm_count}, possible: {self.possible_count}[/green]")
             self.action_save_results()
-            self._mark_scan_complete()
             self.notify(f"WHM scan complete: {self.whm_count} found", severity="information", timeout=4)
         except asyncio.CancelledError:
             self._log("[yellow]Scan cancelled[/yellow]")
@@ -794,10 +759,6 @@ class WHMScannerTUI(App):
 
     async def _process_result(self, ip: str, result: WhmResult) -> None:
         self.results[ip] = result
-        self.scanned_ips.add(ip)
-        self._append_checkpoint_realtime(ip)
-        if result.get("live"):
-            self._append_live_result_realtime(ip, result)
         if result.get("whm"):
             self.whm_count += 1
             hostname = str(result.get("hostname", "") or "")
@@ -821,82 +782,14 @@ class WHMScannerTUI(App):
         self._update_stats(current_ip=ip)
 
     def _prepare_realtime_output(self) -> None:
-        """Create/truncate realtime output files before autosave starts."""
+        """Create/truncate the WHM output file before realtime autosave starts."""
         try:
             output = Path(self.output_path)
-            live_output = Path(self.live_output_path)
-            resume_mode = bool(self.resume_scanned_ips)
-            for path in (output, live_output):
-                path.parent.mkdir(parents=True, exist_ok=True)
-                if resume_mode:
-                    path.touch(exist_ok=True)
-                else:
-                    path.write_text("", encoding="utf-8")
-            self._log(f"[cyan]Realtime WHM output: {output}[/cyan]")
-            self._log(f"[cyan]Realtime live IP output: {live_output}[/cyan]")
-            if resume_mode:
-                self._restore_autosave_keys_from_files()
+            output.parent.mkdir(parents=True, exist_ok=True)
+            output.write_text("", encoding="utf-8")
+            self._log(f"[cyan]Realtime output: {output}[/cyan]")
         except Exception as exc:
             self._log(f"[red]Realtime output init failed: {exc}[/red]")
-
-    def _load_resume_checkpoint(self) -> None:
-        """Load scanned IP checkpoint so interrupted scans can skip finished IPs."""
-        checkpoint = Path(self.checkpoint_path)
-        if not checkpoint.exists():
-            return
-        try:
-            with checkpoint.open("r", encoding="utf-8") as f:
-                self.resume_scanned_ips = {line.strip() for line in f if line.strip()}
-        except Exception as exc:
-            self._log(f"[yellow]Could not load checkpoint: {exc}[/yellow]")
-
-    def _restore_autosave_keys_from_files(self) -> None:
-        """Restore dedupe sets when resuming an interrupted scan."""
-        try:
-            output = Path(self.output_path)
-            if output.exists():
-                with output.open("r", encoding="utf-8") as f:
-                    for line in f:
-                        key = line.split("#", 1)[0].strip()
-                        if key:
-                            self._autosaved_whm_keys.add(key)
-            live_output = Path(self.live_output_path)
-            if live_output.exists():
-                with live_output.open("r", encoding="utf-8") as f:
-                    for line in f:
-                        key = line.strip()
-                        if key:
-                            self._autosaved_live_keys.add(key)
-                self.live_count = len(self._autosaved_live_keys)
-        except Exception as exc:
-            self._log(f"[yellow]Could not restore realtime output state: {exc}[/yellow]")
-
-    def _append_checkpoint_realtime(self, ip: str) -> None:
-        """Append every scanned IP to a checkpoint file immediately."""
-        try:
-            checkpoint = Path(self.checkpoint_path)
-            checkpoint.parent.mkdir(parents=True, exist_ok=True)
-            with checkpoint.open("a", encoding="utf-8") as f:
-                f.write(ip + "\n")
-                f.flush()
-        except Exception as exc:
-            self._log(f"[yellow]Checkpoint save failed for {ip}: {exc}[/yellow]")
-
-    def _append_live_result_realtime(self, ip: str, result: WhmResult) -> None:
-        """Append every reachable/live IP immediately to the live-IP file."""
-        key = ip
-        if key in self._autosaved_live_keys:
-            return
-        try:
-            live_output = Path(self.live_output_path)
-            live_output.parent.mkdir(parents=True, exist_ok=True)
-            with live_output.open("a", encoding="utf-8") as f:
-                f.write(key + "\n")
-                f.flush()
-            self._autosaved_live_keys.add(key)
-            self.live_count += 1
-        except Exception as exc:
-            self._log(f"[red]Realtime live save failed for {key}: {exc}[/red]")
 
     def _append_whm_result_realtime(self, ip: str, result: WhmResult) -> None:
         """Append a WHM-positive result immediately to the output TXT file."""
@@ -920,26 +813,16 @@ class WHMScannerTUI(App):
         except Exception as exc:
             self._log(f"[red]Realtime save failed for {key}: {exc}[/red]")
 
-    def _mark_scan_complete(self) -> None:
-        """Create a done marker so future scans do not resume a completed run."""
-        try:
-            done_marker = Path(self.done_marker_path)
-            done_marker.parent.mkdir(parents=True, exist_ok=True)
-            done_marker.write_text("completed\n", encoding="utf-8")
-        except Exception as exc:
-            self._log(f"[yellow]Could not write completion marker: {exc}[/yellow]")
-
     def _add_result_row(self, ip: str, result: WhmResult, whm_status: str) -> None:
         table = self.query_one("#results-table", DataTable)
         port = str(result.get("port", "") or "-")
-        confidence = str(result.get("confidence", 0) or 0)
         open_ports = ", ".join(result.get("open_ports", []) or []) or "-"
         try:
             if ip in table.rows:
                 table.remove_row(ip)
         except Exception:
             pass
-        table.add_row(ip, whm_status, port, confidence, open_ports, key=ip)
+        table.add_row(ip, whm_status, port, open_ports, key=ip)
 
     def _tick_stats(self) -> None:
         status = "Paused" if self.is_paused else ("Running" if self.scan_started else "Idle")

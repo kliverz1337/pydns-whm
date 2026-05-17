@@ -40,7 +40,7 @@ WHM_PORTS: tuple[tuple[int, bool], ...] = ((2087, True), (2086, False))
 
 # ── Result type ────────────────────────────────────────────────────────────
 
-WhmResult = dict  # {whm, hostname, target, port, path, possible, open_ports, live, live_ports, confidence, reason}
+WhmResult = dict  # {whm, hostname, target, port, path, possible, open_ports}
 
 
 # ── Scanner class ──────────────────────────────────────────────────────────
@@ -159,10 +159,6 @@ class WhmScanner:
             "path": "",
             "possible": False,
             "open_ports": [],
-            "live": False,
-            "live_ports": [],
-            "confidence": 0,
-            "reason": "no_open_whm_port",
         }
 
     async def _tcp_port_open(self, target: str, port: int) -> bool:
@@ -209,12 +205,6 @@ class WhmScanner:
                     continue
 
                 result["open_ports"].append(f"{ip}:{port}")
-                result["live"] = True
-                result["live_ports"].append(port)
-                result["target"] = ip
-                result["port"] = port
-                result["confidence"] = max(int(result.get("confidence", 0) or 0), 30)
-                result["reason"] = "whm_port_open"
                 scheme = "https" if use_https else "http"
 
                 for path in WHM_PATHS:
@@ -235,8 +225,6 @@ class WhmScanner:
 
                         if marker_found or url_hint:
                             hostname = self._extract_title(body)
-                            confidence = 100 if marker_found else 85
-                            reason = "whm_marker" if marker_found else "whm_url_hint"
                             result = {
                                 "whm": True,
                                 "hostname": hostname or "WHM Login",
@@ -245,10 +233,6 @@ class WhmScanner:
                                 "path": path,
                                 "possible": True,
                                 "open_ports": result.get("open_ports", []),
-                                "live": True,
-                                "live_ports": result.get("live_ports", []),
-                                "confidence": confidence,
-                                "reason": reason,
                             }
                             # Found — stop probing this IP
                             if self.progress_callback:
@@ -261,8 +245,6 @@ class WhmScanner:
                             result["target"] = ip
                             result["port"] = port
                             result["path"] = path
-                            result["confidence"] = max(int(result.get("confidence", 0) or 0), 60)
-                            result["reason"] = "protected_whm_port"
 
                     except httpx.TimeoutException:
                         logger.debug(f"WHM timeout: {url}")
